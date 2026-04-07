@@ -25,7 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 CONDITIONS = {
     "homo_nca":   ["qwen2.5:7b", "qwen2.5:7b", "qwen2.5:7b"],
     "het_nca_v1": ["qwen2.5:7b", "llama3:latest", "mistral:7b"],
-    "het_nca_v2": ["qwen2.5:7b", "gemma2:7b", "phi3"],
+    "het_nca_v2": ["qwen2.5:7b", "gemma2:9b", "phi3"],
 }
 
 AGREE = [30, 80, 80]

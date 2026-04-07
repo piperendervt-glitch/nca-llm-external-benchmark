@@ -17,5 +17,5 @@ Benchmarks: COPA, αNLI, RuleTaker-depth-1
 Conditions:
   - 7b_homo_NCA
   - 7b_het_NCA (qwen2.5/llama3/mistral)
-  - 7b_het_NCA (qwen2.5/gemma2/phi3)
+  - 7b_het_NCA (qwen2.5/gemma2:9b/phi3)
   - 7b_majority_vote
