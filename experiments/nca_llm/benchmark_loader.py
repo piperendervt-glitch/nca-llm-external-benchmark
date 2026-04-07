@@ -8,6 +8,8 @@ import random
 from pathlib import Path
 from dataclasses import dataclass
 
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
 
 @dataclass
 class Task:
@@ -24,7 +26,7 @@ def load_alphanli(n=1092, seed=42) -> list[Task]:
     # Combine train + validation
     all_items = []
     for split in ["train", "validation"]:
-        path = Path(f"reference/benchmarks/alphanli/{split}.jsonl")
+        path = REPO_ROOT / f"reference/benchmarks/alphanli/{split}.jsonl"
         with open(path, encoding="utf-8") as f:
             for line in f:
                 all_items.append(json.loads(line))
@@ -84,7 +86,7 @@ def load_ruletaker_d1(n=1092, seed=42) -> list[Task]:
 
     # HF "hitachi-nlp/ruletaker" fields: context, question, label ("entailment"/"not entailment"), config
     for split in ["train", "dev", "test"]:
-        path = Path(f"reference/benchmarks/ruletaker/{split}.jsonl")
+        path = REPO_ROOT / f"reference/benchmarks/ruletaker/{split}.jsonl"
         if not path.exists():
             continue
         with open(path, encoding="utf-8") as f:
