@@ -1,40 +1,40 @@
 {
   "stigmergy_nca": {
-    "n": 50,
-    "accuracy": 0.62,
-    "accuracy_pct": 62.0,
-    "unanimity_rate": 0.32,
-    "mirror_effect_score": 0.04,
-    "pheromone_mean": 0.522,
-    "pheromone_neutral_rate": 1.0,
-    "pheromone_decisive_rate": 0.0
+    "n": 200,
+    "accuracy": 0.64,
+    "accuracy_pct": 64.0,
+    "unanimity_rate": 0.46,
+    "mirror_effect_score": 0.11,
+    "pheromone_mean": 0.5395,
+    "pheromone_neutral_rate": 0.45,
+    "pheromone_decisive_rate": 0.015
   },
   "homo_nca": {
-    "n": 50,
-    "accuracy": 0.52,
-    "accuracy_pct": 52.0,
+    "n": 200,
+    "accuracy": 0.515,
+    "accuracy_pct": 51.5,
     "unanimity_rate": 0.76,
-    "mirror_effect_score": 0.4
+    "mirror_effect_score": 0.37
   },
   "het_nca_v1": {
-    "n": 50,
-    "accuracy": 0.56,
-    "accuracy_pct": 56.0,
-    "unanimity_rate": 0.86,
-    "mirror_effect_score": 0.42
+    "n": 200,
+    "accuracy": 0.555,
+    "accuracy_pct": 55.5,
+    "unanimity_rate": 0.88,
+    "mirror_effect_score": 0.395
   },
   "het_nca_v2": {
-    "n": 50,
-    "accuracy": 0.42,
-    "accuracy_pct": 42.0,
-    "unanimity_rate": 0.0,
+    "n": 200,
+    "accuracy": 0.46,
+    "accuracy_pct": 46.0,
+    "unanimity_rate": 0.04,
     "mirror_effect_score": 0.0
   },
   "majority_vote": {
-    "n": 50,
-    "accuracy": 0.72,
-    "accuracy_pct": 72.0,
-    "unanimity_rate": 0.4,
-    "mirror_effect_score": 0.08
+    "n": 200,
+    "accuracy": 0.6,
+    "accuracy_pct": 60.0,
+    "unanimity_rate": 0.44,
+    "mirror_effect_score": 0.115
   }
 }
