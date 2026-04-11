@@ -21,6 +21,7 @@ Compare against existing conditions:
 
 import argparse
 import json
+import random
 import time
 from collections import Counter
 from pathlib import Path
@@ -252,7 +253,7 @@ def run_nca_standard(task: dict, models: list[str]) -> dict:
 
 # ── NCA run (stigmergy) ───────────────────────────────────────────────────────
 
-def run_nca_stigmergy(task: dict, models: list[str]) -> dict:
+def run_nca_stigmergy(task, models: list[str], pheromone_mode: str = "dynamic") -> dict:
     """Stigmergy NCA: pheromone-mediated coordination."""
     pheromone = PheromoneLayer(n_nodes=len(models))
     outputs = []
@@ -272,7 +273,15 @@ def run_nca_stigmergy(task: dict, models: list[str]) -> dict:
         # Write pheromone trace
         decision = out.get("decision", "UNKNOWN")
         confidence = float(out.get("confidence", 0.5))
-        pheromone.write(step, decision, confidence)
+
+        if pheromone_mode == "random":
+            # ランダムフェロモン: 実際の推論と無関係な値を注入
+            rand_decision = random.choice(["1", "2"])
+            rand_confidence = random.uniform(0.5, 0.95)
+            pheromone.write(step, rand_decision, rand_confidence)
+        else:
+            # dynamic: 通常のフェロモン更新
+            pheromone.write(step, decision, confidence)
 
         pheromone_history.append({
             "step": step,
@@ -297,7 +306,7 @@ def run_nca_stigmergy(task: dict, models: list[str]) -> dict:
 
 # ── Benchmark runner ──────────────────────────────────────────────────────────
 
-def run_experiment(benchmark: str, condition: str, n_samples: int = 50):
+def run_experiment(benchmark: str, condition: str, n_samples: int = 50, pheromone_mode: str = "dynamic"):
     models = CONDITIONS[condition]
     use_stigmergy = condition == "stigmergy_nca"
 
@@ -312,11 +321,12 @@ def run_experiment(benchmark: str, condition: str, n_samples: int = 50):
     # Output path
     results_dir = REPO_ROOT / "results" / "nca_stigmergy"
     results_dir.mkdir(parents=True, exist_ok=True)
-    results_path = results_dir / f"{benchmark}_{condition}.jsonl"
+    results_path = results_dir / f"{benchmark}_{condition}_{pheromone_mode}.jsonl"
 
     print(f"[Stigmergy-NCA] benchmark={benchmark} condition={condition}")
     print(f"  models: {models}")
     print(f"  stigmergy: {use_stigmergy}")
+    print(f"  pheromone_mode: {pheromone_mode}")
     print(f"  n_samples: {len(tasks)}")
     print(f"  output: {results_path}")
 
@@ -328,7 +338,7 @@ def run_experiment(benchmark: str, condition: str, n_samples: int = 50):
             t0 = time.time()
 
             if use_stigmergy:
-                result = run_nca_stigmergy(task, models)
+                result = run_nca_stigmergy(task, models, pheromone_mode=pheromone_mode)
             else:
                 result = run_nca_standard(task, models)
 
@@ -429,6 +439,12 @@ def main():
         help="Number of samples to evaluate (default: 50)",
     )
     parser.add_argument(
+        "--pheromone_mode",
+        choices=["dynamic", "random"],
+        default="dynamic",
+        help="dynamic: normal pheromone update / random: ablation control",
+    )
+    parser.add_argument(
         "--mirror_only",
         action="store_true",
         help="Only compute mirror effect on existing results (no new inference)",
@@ -437,7 +453,7 @@ def main():
 
     if args.mirror_only:
         results_dir = REPO_ROOT / "results" / "nca_stigmergy"
-        results_path = results_dir / f"{args.benchmark}_{args.condition}.jsonl"
+        results_path = results_dir / f"{args.benchmark}_{args.condition}_{args.pheromone_mode}.jsonl"
         if not results_path.exists():
             print(f"Results file not found: {results_path}")
             return
@@ -445,11 +461,11 @@ def main():
         print(json.dumps(stats, indent=2))
         return
 
-    run_experiment(args.benchmark, args.condition, args.n_samples)
+    run_experiment(args.benchmark, args.condition, args.n_samples, args.pheromone_mode)
 
     # Auto-compute mirror effect after run
     results_dir = REPO_ROOT / "results" / "nca_stigmergy"
-    results_path = results_dir / f"{args.benchmark}_{args.condition}.jsonl"
+    results_path = results_dir / f"{args.benchmark}_{args.condition}_{args.pheromone_mode}.jsonl"
     if results_path.exists():
         print("\n── Mirror Effect measurement ──")
         stats = measure_mirror_effect(results_path)
