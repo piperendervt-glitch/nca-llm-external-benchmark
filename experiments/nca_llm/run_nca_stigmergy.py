@@ -260,12 +260,23 @@ def run_nca_stigmergy(task, models: list[str], pheromone_mode: str = "dynamic") 
     pheromone_history = []
 
     for step, model in enumerate(models):
-        prompt = build_stigmergy_prompt(
-            task=task,
-            pheromone=pheromone,
-            step=step,
-            previous_outputs=outputs,
-        )
+        if pheromone_mode == "no_prompt":
+            # 条件C: フェロモンプロンプトなし、weighted_voteのみ
+            prompt = build_base_prompt(task)
+            if outputs:
+                prev_text = "\n".join(
+                    f"  Node {i+1}: decision={o.get('decision','?')}"
+                    for i, o in enumerate(outputs)
+                )
+                prompt += f"\n\nPrevious nodes:\n{prev_text}"
+        else:
+            # dynamic / random / prompt_only: フェロモンプロンプトあり
+            prompt = build_stigmergy_prompt(
+                task=task,
+                pheromone=pheromone,
+                step=step,
+                previous_outputs=outputs,
+            )
 
         out = call_llm(model, prompt)
         outputs.append(out)
@@ -274,13 +285,13 @@ def run_nca_stigmergy(task, models: list[str], pheromone_mode: str = "dynamic") 
         decision = out.get("decision", "UNKNOWN")
         confidence = float(out.get("confidence", 0.5))
 
-        if pheromone_mode == "random":
+        if pheromone_mode in ("random", "prompt_only"):
             # ランダムフェロモン: 実際の推論と無関係な値を注入
             rand_decision = random.choice(["1", "2"])
             rand_confidence = random.uniform(0.5, 0.95)
             pheromone.write(step, rand_decision, rand_confidence)
         else:
-            # dynamic: 通常のフェロモン更新
+            # dynamic / no_prompt: 通常のフェロモン更新
             pheromone.write(step, decision, confidence)
 
         pheromone_history.append({
@@ -289,10 +300,17 @@ def run_nca_stigmergy(task, models: list[str], pheromone_mode: str = "dynamic") 
             "global_pheromone": pheromone.global_pheromone,
         })
 
-    # Pheromone-weighted aggregation
+    # Aggregation
     decisions = [o.get("decision", "UNKNOWN") for o in outputs]
     confidences = [float(o.get("confidence", 0.5)) for o in outputs]
-    final = pheromone.weighted_vote(decisions, confidences)
+
+    if pheromone_mode == "prompt_only":
+        # 条件D: majority_vote を使う（weighted_voteを使わない）
+        counts = Counter(d for d in decisions if d != "UNKNOWN")
+        final = counts.most_common(1)[0][0] if counts else "UNKNOWN"
+    else:
+        # dynamic / random / no_prompt: weighted_vote を使う
+        final = pheromone.weighted_vote(decisions, confidences)
 
     return {
         "final_decision": final,
@@ -440,9 +458,14 @@ def main():
     )
     parser.add_argument(
         "--pheromone_mode",
-        choices=["dynamic", "random"],
+        choices=["dynamic", "random", "no_prompt", "prompt_only"],
         default="dynamic",
-        help="dynamic: normal pheromone update / random: ablation control",
+        help=(
+            "dynamic: normal pheromone update (条件A) / "
+            "random: random pheromone signal (条件D相当) / "
+            "no_prompt: weighted_vote only, no pheromone prompt (条件C) / "
+            "prompt_only: random prompt + majority_vote (条件D)"
+        ),
     )
     parser.add_argument(
         "--mirror_only",
