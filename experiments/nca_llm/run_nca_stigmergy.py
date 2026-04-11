@@ -44,7 +44,7 @@ CONDITIONS = {
 }
 
 STEPS = 3
-PHEROMONE_DECAY = 0.8   # How much previous pheromone persists each step (0~1)
+PHEROMONE_DECAY = 0.3   # How much previous pheromone persists each step (0~1)
 PHEROMONE_INIT  = 0.5   # Neutral starting value
 
 _client = httpx.Client(timeout=120.0)
