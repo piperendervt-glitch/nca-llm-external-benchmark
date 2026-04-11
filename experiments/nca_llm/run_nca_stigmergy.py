@@ -106,14 +106,23 @@ class PheromoneLayer:
         """
         Returns a natural language summary of the current pheromone state
         for injection into the next node's prompt.
+        Includes direction and strength explicitly.
         """
         g = self.global_pheromone
+        strength = abs(g - 0.5) * 2  # 0.0(neutral) ~ 1.0(decisive)
+
         if g > 0.65:
-            signal = "Previous reasoners leaned toward answer 1."
+            direction = "answer 1"
+            signal = f"Previous reasoners leaned toward answer 1 (strength: {strength:.2f})."
         elif g < 0.35:
-            signal = "Previous reasoners leaned toward answer 2."
+            direction = "answer 2"
+            signal = f"Previous reasoners leaned toward answer 2 (strength: {strength:.2f})."
+        elif g > 0.55:
+            signal = f"Previous reasoners slightly leaned toward answer 1 (strength: {strength:.2f})."
+        elif g < 0.45:
+            signal = f"Previous reasoners slightly leaned toward answer 2 (strength: {strength:.2f})."
         else:
-            signal = "Previous reasoners showed no clear consensus."
+            signal = f"Previous reasoners showed no clear consensus (strength: {strength:.2f})."
 
         per_node = ", ".join(
             f"node{i+1}={v:.2f}" for i, v in enumerate(self.values)
