@@ -1,20 +1,29 @@
 """
 run_nca_hgnn.py
 
-HGNN-bucket実験 Stage 1: 5ノード × 2分割。
-全ノード完全非通信（contextなし）で独立推論。
-confidence分位数で low/high に2分割し、
-agreement率が高いバケットの多数決を最終回答とする。
+HGNN-bucket実験。
 
-検証仮説:
-  仮説X: high-confidenceバケットのagreementが高い問題では
-         high群の多数決の正解率が高い
-  仮説Y: low-confidenceバケットのagreementが高い問題では
-         low群の多数決の方が正解率が高い
+Stage 1: 5ノード × 2分割
+  全ノード完全非通信（contextなし）で独立推論。
+  confidence分位数で low/high に2分割し、
+  agreement率が高いバケットの多数決を最終回答とする。
+  検証仮説:
+    仮説X: high-confidenceバケットのagreementが高い問題では
+           high群の多数決の正解率が高い
+    仮説Y: low-confidenceバケットのagreementが高い問題では
+           low群の多数決の方が正解率が高い
+
+Stage 2: 7ノード × 3分割 + intervention
+  7ノード独立推論 → confidence分位数で low/mid/high に3分割。
+  全ノードが全会一致ならそのまま採用（intervention=False）。
+  不一致時はagreement率最大のバケットの多数決で介入（intervention=True）。
+  検証仮説:
+    仮説A: intervention率が高い問題セットでHGNNがflatを上回る
+    仮説B: mid-bucketが選択される場合は正解率が安定する
 
 Usage:
   python run_nca_hgnn.py --benchmark alphanli --n_samples 50
-  python run_nca_hgnn.py --benchmark ruletaker_d1 --n_samples 50
+  python run_nca_hgnn.py --benchmark alphanli --n_samples 50 --stage 2
 """
 
 import argparse
@@ -40,6 +49,16 @@ MODELS_5NODE = [
     "qwen2.5:7b",
     "qwen2.5:7b",
     "llama3:latest",
+    "mistral:7b",
+    "gemma2:9b",
+]
+
+MODELS_7NODE = [
+    "qwen2.5:7b",
+    "qwen2.5:7b",
+    "llama3:latest",
+    "llama3:latest",
+    "mistral:7b",
     "mistral:7b",
     "gemma2:9b",
 ]
@@ -143,6 +162,26 @@ def quantile_split(outputs: list[dict]) -> dict:
     }
 
 
+def quantile_3split(outputs: list[dict]) -> dict:
+    """
+    confidence の分位数で outputs を low / mid / high に3分割する。
+    n=7の場合: low=下位2ノード、mid=中位2ノード、high=上位3ノード
+    """
+    sorted_outputs = sorted(
+        outputs,
+        key=lambda o: float(o.get("confidence", 0.5))
+    )
+    n = len(sorted_outputs)
+    # n=7: low=2, mid=2, high=3
+    cut_low = n // 3
+    cut_high = n // 3 * 2
+    return {
+        "low":  sorted_outputs[:cut_low],
+        "mid":  sorted_outputs[cut_low:cut_high],
+        "high": sorted_outputs[cut_high:],
+    }
+
+
 def bucket_agreement(bucket: list[dict]) -> float:
     """
     バケット内のノードが同じdecisionに投票している割合。
@@ -223,12 +262,85 @@ def run_hgnn_2split(task, models: list[str]) -> dict:
     }
 
 
+def run_hgnn_3split(task, models: list[str]) -> dict:
+    """
+    7ノード独立推論 → 3分割 → intervention判定。
+    全会一致ならそのまま採用、不一致ならagreement最大バケットで介入。
+    """
+    # Step 1: 全ノード独立推論（contextなし）
+    outputs = []
+    for model in models:
+        prompt = build_base_prompt(task)
+        out = call_llm(model, prompt)
+        outputs.append({"model": model, **out})
+
+    # Step 2: flatの多数決（baseline）
+    all_decisions = [o.get("decision", "UNKNOWN") for o in outputs]
+    flat_final = majority_vote_bucket(outputs)
+
+    # Step 3: 全会一致チェック
+    valid_decisions = [d for d in all_decisions if d not in ("UNKNOWN", None)]
+    is_unanimous = len(set(valid_decisions)) <= 1
+
+    # Step 4: 分位数で3分割
+    buckets = quantile_3split(outputs)
+
+    if is_unanimous:
+        # 全会一致: flatをそのまま採用
+        final = flat_final
+        selected_bucket = "all"
+        intervention = False
+    else:
+        # 不一致: agreement率最大のバケットで介入
+        agreements = {
+            k: bucket_agreement(v)
+            for k, v in buckets.items()
+        }
+        best_key = max(
+            {k: v for k, v in agreements.items() if len(buckets[k]) >= 2},
+            key=lambda k: agreements[k],
+            default="high"
+        )
+        final = majority_vote_bucket(buckets[best_key])
+        selected_bucket = best_key
+        intervention = True
+
+    agreements = {k: bucket_agreement(v) for k, v in buckets.items()}
+
+    return {
+        "final_decision": final,
+        "flat_decision": flat_final,
+        "selected_bucket": selected_bucket,
+        "intervention": intervention,
+        "is_unanimous": is_unanimous,
+        "agreements": agreements,
+        "buckets": {
+            k: [{"model": o["model"],
+                 "decision": o.get("decision"),
+                 "confidence": o.get("confidence")}
+                for o in v]
+            for k, v in buckets.items()
+        },
+        "all_decisions": all_decisions,
+        "outputs": outputs,
+    }
+
+
 # ─────────────────────────────────────────────
 #  実験実行
 # ─────────────────────────────────────────────
 
-def run_experiment(benchmark: str, n_samples: int = 50):
-    models = MODELS_5NODE
+def run_experiment(benchmark: str, n_samples: int = 50, stage: int = 1):
+    if stage == 1:
+        models = MODELS_5NODE
+        run_fn = run_hgnn_2split
+        tag = "2split"
+    elif stage == 2:
+        models = MODELS_7NODE
+        run_fn = run_hgnn_3split
+        tag = "3split"
+    else:
+        raise ValueError(f"Unknown stage: {stage}")
 
     if benchmark == "alphanli":
         tasks = load_alphanli(n_samples)
@@ -239,9 +351,9 @@ def run_experiment(benchmark: str, n_samples: int = 50):
 
     results_dir = REPO_ROOT / "results" / "nca_hgnn"
     results_dir.mkdir(parents=True, exist_ok=True)
-    results_path = results_dir / f"{benchmark}_hgnn_2split.jsonl"
+    results_path = results_dir / f"{benchmark}_hgnn_{tag}.jsonl"
 
-    print(f"[HGNN-2split] benchmark={benchmark}")
+    print(f"[HGNN-{tag}] benchmark={benchmark}")
     print(f"  models: {models}")
     print(f"  n_samples: {len(tasks)}")
     print(f"  output: {results_path}")
@@ -249,6 +361,7 @@ def run_experiment(benchmark: str, n_samples: int = 50):
     correct_hgnn = 0
     correct_flat = 0
     total = 0
+    intervention_count = 0
 
     # bucket選択の統計
     bucket_selection_counts = Counter()
@@ -257,7 +370,7 @@ def run_experiment(benchmark: str, n_samples: int = 50):
         for i, task in enumerate(tasks):
             t0 = time.time()
 
-            result = run_hgnn_2split(task, models)
+            result = run_fn(task, models)
             elapsed = time.time() - t0
 
             label = label_to_decision(task.label)
@@ -265,6 +378,8 @@ def run_experiment(benchmark: str, n_samples: int = 50):
             is_correct_flat = result["flat_decision"] == label
 
             bucket_selection_counts[result["selected_bucket"]] += 1
+            if result.get("intervention"):
+                intervention_count += 1
 
             record = {
                 "task_id": i,
@@ -280,6 +395,10 @@ def run_experiment(benchmark: str, n_samples: int = 50):
                 "all_decisions": result["all_decisions"],
                 "elapsed_sec": round(elapsed, 2),
             }
+            if stage == 2:
+                record["intervention"] = result["intervention"]
+                record["is_unanimous"] = result["is_unanimous"]
+
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
             correct_hgnn += int(is_correct_hgnn)
@@ -296,9 +415,11 @@ def run_experiment(benchmark: str, n_samples: int = 50):
     acc_flat = correct_flat / total * 100 if total > 0 else 0.0
 
     print(f"\n[Done]")
-    print(f"  HGNN-2split : {acc_hgnn:.1f}% ({correct_hgnn}/{total})")
+    print(f"  HGNN-{tag} : {acc_hgnn:.1f}% ({correct_hgnn}/{total})")
     print(f"  Flat majority: {acc_flat:.1f}% ({correct_flat}/{total})")
     print(f"  Bucket selection: {dict(bucket_selection_counts)}")
+    if stage == 2:
+        print(f"  Intervention: {intervention_count}/{total} ({intervention_count/total*100:.1f}%)")
     print(f"  Results saved: {results_path}")
 
     return acc_hgnn, acc_flat
@@ -320,8 +441,14 @@ def main():
         type=int,
         default=50,
     )
+    parser.add_argument(
+        "--stage",
+        type=int,
+        choices=[1, 2],
+        default=1,
+    )
     args = parser.parse_args()
-    run_experiment(args.benchmark, args.n_samples)
+    run_experiment(args.benchmark, args.n_samples, args.stage)
 
 
 if __name__ == "__main__":
