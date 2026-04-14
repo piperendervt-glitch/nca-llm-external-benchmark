@@ -1,28 +1,31 @@
 <#
 .SYNOPSIS
-    実験をPowerShellバックグラウンドジョブとして起動・管理するスクリプト。
-    SSH切断後もジョブが継続して動作する。
+    実験をWindows タスクスケジューラで起動・管理するスクリプト。
+    SSH切断後もタスクが継続して動作する。
 
 .USAGE
-    # ジョブ起動
+    # タスク起動
     .\run_background.ps1 -Action start -JobName "hgnn_n200" -Script "run_nca_hgnn.py" -Args "--benchmark alphanli --n_samples 200"
 
-    # ジョブ一覧
+    # タスク一覧
     .\run_background.ps1 -Action list
 
-    # ジョブ結果確認
+    # 途中経過確認（直近ログ + 進捗）
+    .\run_background.ps1 -Action tail -JobName "hgnn_n200"
+
+    # 全ログ確認
     .\run_background.ps1 -Action result -JobName "hgnn_n200"
 
-    # ジョブ停止
+    # タスク停止
     .\run_background.ps1 -Action stop -JobName "hgnn_n200"
 
-    # 全ジョブ停止
+    # 全タスク停止
     .\run_background.ps1 -Action stopall
 #>
 
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("start", "list", "result", "stop", "stopall")]
+    [ValidateSet("start", "list", "tail", "result", "stop", "stopall")]
     [string]$Action,
 
     [string]$JobName = "",
@@ -30,7 +33,7 @@ param(
     [string]$Args    = ""
 )
 
-$REPO_ROOT = "C:\Users\pipe_render\nca-llm-external-benchmark"
+$REPO_ROOT  = "C:\Users\pipe_render\nca-llm-external-benchmark"
 $SCRIPT_DIR = "$REPO_ROOT\experiments\nca_llm"
 $LOG_DIR    = "$REPO_ROOT\logs"
 
@@ -45,7 +48,7 @@ switch ($Action) {
         if (-not $JobName) { Write-Error "JobName が必要です"; exit 1 }
         if (-not $Script)  { Write-Error "Script が必要です";  exit 1 }
 
-        $logFile = "$LOG_DIR\${JobName}.log"
+        $logFile    = "$LOG_DIR\${JobName}.log"
         $scriptPath = "$SCRIPT_DIR\$Script"
 
         if (-not (Test-Path $scriptPath)) {
@@ -53,118 +56,180 @@ switch ($Action) {
             exit 1
         }
 
-        # 既存の同名ジョブを確認
-        $existing = Get-Job -Name $JobName -ErrorAction SilentlyContinue
+        # 既存の同名タスクを確認・削除
+        $existing = Get-ScheduledTask -TaskName $JobName -ErrorAction SilentlyContinue
         if ($existing) {
-            Write-Warning "同名のジョブが既に存在します: $JobName (State: $($existing.State))"
-            $confirm = Read-Host "上書きしますか？ (y/n)"
-            if ($confirm -ne "y") { exit 0 }
-            Stop-Job -Name $JobName -ErrorAction SilentlyContinue
-            Remove-Job -Name $JobName -ErrorAction SilentlyContinue
+            Write-Warning "同名のタスクが既に存在します: $JobName (State: $($existing.State))"
+            Stop-ScheduledTask -TaskName $JobName -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $JobName -Confirm:$false
         }
 
-        $jobScript = {
-            param($scriptDir, $scriptPath, $scriptArgs, $logFile)
-            Set-Location $scriptDir
-            $cmd = "python `"$scriptPath`" $scriptArgs"
-            Write-Output "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] START: $cmd" |
-                Tee-Object -FilePath $logFile
-            Invoke-Expression $cmd 2>&1 |
-                Tee-Object -FilePath $logFile -Append
-            Write-Output "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] DONE" |
-                Tee-Object -FilePath $logFile -Append
-        }
+        # 開始マーカー
+        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] START: python $Script $Args" |
+            Out-File -FilePath $logFile -Encoding utf8
 
-        $job = Start-Job `
-            -Name $JobName `
-            -ScriptBlock $jobScript `
-            -ArgumentList $SCRIPT_DIR, $scriptPath, $Args, $logFile
+        # ラッパースクリプトを生成（タスクスケジューラから実行）
+        $wrapperPath = "$LOG_DIR\${JobName}_wrapper.ps1"
+        $wrapperContent = @'
+Set-Location '{0}'
+python '{1}' {2} 2>&1 | Tee-Object -FilePath '{3}' -Append
+$doneTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+Add-Content -Path '{3}' -Value "[$doneTime] DONE"
+'@ -f $SCRIPT_DIR, $scriptPath, $Args, $logFile
+        $wrapperContent | Out-File -FilePath $wrapperPath -Encoding utf8
+
+        # タスクスケジューラで実行（SSH切断後も継続）
+        $taskAction = New-ScheduledTaskAction `
+            -Execute "powershell.exe" `
+            -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$wrapperPath`"" `
+            -WorkingDirectory $SCRIPT_DIR
+
+        $principal = New-ScheduledTaskPrincipal `
+            -UserId $env:USERNAME `
+            -LogonType S4U `
+            -RunLevel Limited
+
+        Register-ScheduledTask `
+            -TaskName $JobName `
+            -Action $taskAction `
+            -Principal $principal `
+            -Force | Out-Null
+
+        Start-ScheduledTask -TaskName $JobName
 
         Write-Host ""
-        Write-Host "✅ ジョブを起動しました" -ForegroundColor Green
+        Write-Host "✅ タスクを起動しました" -ForegroundColor Green
         Write-Host "   JobName : $JobName"
-        Write-Host "   JobId   : $($job.Id)"
         Write-Host "   Script  : $Script $Args"
         Write-Host "   Log     : $logFile"
         Write-Host ""
+        Write-Host "途中経過の確認:"
+        Write-Host "   .\run_background.ps1 -Action tail -JobName `"$JobName`""
         Write-Host "結果確認:"
         Write-Host "   .\run_background.ps1 -Action result -JobName `"$JobName`""
-        Write-Host "ログ確認:"
-        Write-Host "   Get-Content `"$logFile`" -Wait"
     }
 
     "list" {
-        $jobs = Get-Job | Where-Object { $_.Name -notlike "Job*" -or $true }
-        if (-not $jobs) {
-            Write-Host "実行中のジョブはありません。"
+        $tasks = Get-ScheduledTask | Where-Object {
+            $_.TaskPath -eq "\" -and
+            (Test-Path "$LOG_DIR\$($_.TaskName).log")
+        }
+
+        if (-not $tasks) {
+            Write-Host "実験タスクが見つかりません。"
         } else {
             Write-Host ""
-            Write-Host "ジョブ一覧:" -ForegroundColor Cyan
+            Write-Host "実験タスク一覧:" -ForegroundColor Cyan
             Write-Host ("-" * 60)
-            $jobs | Format-Table -AutoSize `
-                @{L="JobName"; E={$_.Name}},
-                @{L="State";   E={$_.State}},
-                @{L="JobId";   E={$_.Id}},
-                @{L="Started"; E={$_.PSBeginTime.ToString("HH:mm:ss")}}
-            Write-Host ""
-            # ログファイルの存在確認
-            foreach ($j in $jobs) {
-                $logFile = "$LOG_DIR\$($j.Name).log"
+            foreach ($t in $tasks) {
+                $logFile  = "$LOG_DIR\$($t.TaskName).log"
+                $lastLine = ""
                 if (Test-Path $logFile) {
                     $lastLine = Get-Content $logFile -Tail 1
-                    Write-Host "[$($j.Name)] 最終ログ: $lastLine"
                 }
+                $info = Get-ScheduledTaskInfo -TaskName $t.TaskName `
+                    -ErrorAction SilentlyContinue
+                Write-Host "[$($t.TaskName)]" -ForegroundColor Yellow
+                Write-Host "  State    : $($t.State)"
+                Write-Host "  LastRun  : $($info.LastRunTime)"
+                Write-Host "  LastLog  : $lastLine"
+                Write-Host ""
             }
+        }
+    }
+
+    "tail" {
+        if (-not $JobName) { Write-Error "JobName が必要です"; exit 1 }
+
+        $logFile = "$LOG_DIR\${JobName}.log"
+
+        if (-not (Test-Path $logFile)) {
+            Write-Error "ログファイルが見つかりません: $logFile"
+            exit 1
+        }
+
+        $task  = Get-ScheduledTask -TaskName $JobName -ErrorAction SilentlyContinue
+        $state = if ($task) { $task.State } else { "Unknown" }
+
+        Write-Host ""
+        Write-Host "[$JobName] State: $state" -ForegroundColor Cyan
+        Write-Host ("-" * 60)
+        Write-Host "直近20行:" -ForegroundColor Yellow
+        Get-Content $logFile -Tail 20
+        Write-Host ""
+
+        $progress = Get-Content $logFile |
+            Where-Object { $_ -match "\[\d+/\d+\]" } |
+            Select-Object -Last 1
+        if ($progress) {
+            Write-Host "最新進捗: $progress" -ForegroundColor Green
+        }
+
+        $done = Get-Content $logFile |
+            Where-Object { $_ -match "DONE" } |
+            Select-Object -Last 1
+        if ($done) {
+            Write-Host "✅ 完了: $done" -ForegroundColor Green
         }
     }
 
     "result" {
         if (-not $JobName) { Write-Error "JobName が必要です"; exit 1 }
 
-        $job = Get-Job -Name $JobName -ErrorAction SilentlyContinue
-        if (-not $job) {
-            Write-Error "ジョブが見つかりません: $JobName"
-            exit 1
-        }
+        $logFile = "$LOG_DIR\${JobName}.log"
+
+        $task  = Get-ScheduledTask -TaskName $JobName -ErrorAction SilentlyContinue
+        $state = if ($task) { $task.State } else { "Unknown" }
 
         Write-Host ""
-        Write-Host "ジョブ: $JobName (State: $($job.State))" -ForegroundColor Cyan
+        Write-Host "タスク: $JobName (State: $state)" -ForegroundColor Cyan
         Write-Host ("-" * 60)
 
-        # ログファイルがあればそちらを表示
-        $logFile = "$LOG_DIR\${JobName}.log"
         if (Test-Path $logFile) {
             Write-Host "ログファイル: $logFile"
             Write-Host ""
             Get-Content $logFile
         } else {
-            # ログがなければReceive-Jobで取得
-            Receive-Job -Name $JobName -Keep
+            Write-Host "ログファイルが見つかりません: $logFile"
         }
     }
 
     "stop" {
         if (-not $JobName) { Write-Error "JobName が必要です"; exit 1 }
 
-        $job = Get-Job -Name $JobName -ErrorAction SilentlyContinue
-        if (-not $job) {
-            Write-Error "ジョブが見つかりません: $JobName"
+        $task = Get-ScheduledTask -TaskName $JobName -ErrorAction SilentlyContinue
+        if (-not $task) {
+            Write-Error "タスクが見つかりません: $JobName"
             exit 1
         }
 
-        Stop-Job   -Name $JobName
-        Remove-Job -Name $JobName
-        Write-Host "✅ ジョブを停止しました: $JobName" -ForegroundColor Yellow
+        Stop-ScheduledTask -TaskName $JobName -ErrorAction SilentlyContinue
+        Unregister-ScheduledTask -TaskName $JobName -Confirm:$false
+
+        # ラッパースクリプト削除
+        $wrapperPath = "$LOG_DIR\${JobName}_wrapper.ps1"
+        if (Test-Path $wrapperPath) { Remove-Item $wrapperPath }
+
+        Write-Host "✅ タスクを停止しました: $JobName" -ForegroundColor Yellow
     }
 
     "stopall" {
-        $jobs = Get-Job
-        if (-not $jobs) {
-            Write-Host "停止するジョブはありません。"
+        $tasks = Get-ScheduledTask | Where-Object {
+            $_.TaskPath -eq "\" -and
+            (Test-Path "$LOG_DIR\$($_.TaskName).log")
+        }
+
+        if (-not $tasks) {
+            Write-Host "停止するタスクはありません。"
         } else {
-            $jobs | Stop-Job
-            $jobs | Remove-Job
-            Write-Host "✅ 全ジョブを停止しました ($($jobs.Count)件)" -ForegroundColor Yellow
+            foreach ($t in $tasks) {
+                Stop-ScheduledTask -TaskName $t.TaskName -ErrorAction SilentlyContinue
+                Unregister-ScheduledTask -TaskName $t.TaskName -Confirm:$false
+
+                $wrapperPath = "$LOG_DIR\$($t.TaskName)_wrapper.ps1"
+                if (Test-Path $wrapperPath) { Remove-Item $wrapperPath }
+            }
+            Write-Host "✅ 全タスクを停止しました ($($tasks.Count)件)" -ForegroundColor Yellow
         }
     }
 }
