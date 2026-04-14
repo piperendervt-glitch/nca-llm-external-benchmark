@@ -15,11 +15,14 @@ Stage 1: 5ノード × 2分割
 
 Stage 2: 7ノード × 3分割 + intervention
   7ノード独立推論 → confidence分位数で low/mid/high に3分割。
-  全ノードが全会一致ならそのまま採用（intervention=False）。
-  不一致時はagreement率最大のバケットの多数決で介入（intervention=True）。
+  全ノードが全会一致ならそのまま採用（unanimous, intervention=False）。
+  不一致時: highとlowのdecisionを比較し、
+    異なる場合 → highを採用（high_override, intervention=True）
+    同じ場合 → flat majorityをそのまま使用（no_intervention）
+    highがUNKNOWN → flat majorityにfallback
   検証仮説:
     仮説A: intervention率が高い問題セットでHGNNがflatを上回る
-    仮説B: mid-bucketが選択される場合は正解率が安定する
+    仮説B: high_override時の正解率がflat majorityより高い
 
 Usage:
   python run_nca_hgnn.py --benchmark alphanli --n_samples 50
@@ -55,12 +58,12 @@ MODELS_5NODE = [
 
 MODELS_7NODE = [
     "qwen2.5:7b",
-    "qwen2.5:7b",
     "llama3:latest",
-    "llama3:latest",
-    "mistral:7b",
     "mistral:7b",
     "gemma2:9b",
+    "phi3:latest",
+    "llama3.1:8b",
+    "granite3.1-moe:3b",
 ]
 
 _client = httpx.Client(timeout=120.0)
@@ -288,22 +291,28 @@ def run_hgnn_3split(task, models: list[str]) -> dict:
     if is_unanimous:
         # 全会一致: flatをそのまま採用
         final = flat_final
-        selected_bucket = "all"
+        selected_bucket = "unanimous"
         intervention = False
     else:
-        # 不一致: agreement率最大のバケットで介入
-        agreements = {
-            k: bucket_agreement(v)
-            for k, v in buckets.items()
-        }
-        best_key = max(
-            {k: v for k, v in agreements.items() if len(buckets[k]) >= 2},
-            key=lambda k: agreements[k],
-            default="high"
-        )
-        final = majority_vote_bucket(buckets[best_key])
-        selected_bucket = best_key
-        intervention = True
+        # 不一致: high vs low の decision比較で介入判定
+        high_decision = majority_vote_bucket(buckets["high"])
+        low_decision = majority_vote_bucket(buckets["low"])
+
+        if high_decision == "UNKNOWN":
+            # highが不明 → flat majorityをそのまま使用
+            final = flat_final
+            selected_bucket = "flat_fallback"
+            intervention = False
+        elif high_decision != low_decision:
+            # highとlowが異なる → highを採用（high_override）
+            final = high_decision
+            selected_bucket = "high"
+            intervention = True
+        else:
+            # highとlowが一致 → 介入不要、flat majorityを使用
+            final = flat_final
+            selected_bucket = "no_intervention"
+            intervention = False
 
     agreements = {k: bucket_agreement(v) for k, v in buckets.items()}
 
